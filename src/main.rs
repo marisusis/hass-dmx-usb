@@ -1,21 +1,24 @@
 use enttecopendmx;
+use libftd2xx::Ft232r;
+use libftd2xx::Ftdi;
+use libftd2xx::FtdiCommon;
 use rumqttc::{MqttOptions, Client, QoS};
 use serde::Deserialize;
+use std::iter::Map;
+use std::sync::mpsc;
 use std::time::Duration;
 use std::thread;
 use std::fs;
 
 use log::{info, trace, warn, debug, error};
 
-#[derive(Deserialize,Debug)]
-struct MQTTConfig {
-    host: String
-}
+mod dmx;
+use dmx::DMXDriver;
 
-#[derive(Deserialize,Debug)]
-struct Config {
-    mqtt: MQTTConfig,
-}
+mod config;
+use config::{Config, LightConfig, LightEntry};
+
+
 
 fn load_config() -> Config {
     let config_contents = match fs::read_to_string("config.toml") {
@@ -31,81 +34,110 @@ fn load_config() -> Config {
     return config;
 }
 
-fn main() {
-    println!("Hello, world!");
+fn main() -> anyhow::Result<()> {
 
-    // use libftd2xx::{Ftdi, FtdiCommon};
+    // Create a channel for shutdown signal
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    
+    // Set up Ctrl-C handler
+    let shutdown_tx_clone = shutdown_tx.clone();
+    ctrlc::set_handler(move || {
+        println!("Received Ctrl-C, shutting down...");
+        let _ = shutdown_tx_clone.send(());
+    })?;
 
-    // let mut ft = Ftdi::new()?;
-    // let info = ft.device_info()?;
-    // println!("Device information: {:?}", info);
 
     let mut clog = colog::default_builder();
     clog.filter(None, log::LevelFilter::Debug);
     clog.init();
 
     let config = load_config();
+    debug!("Loaded config: {:?}", config);
 
-    info!("Loaded config: {:?}", config);
+
+    // Open DMX interface
+    let mut ft = Ftdi::new()?;
+    let info = ft.device_info()?;
+    println!("Device information: {:?}", info);
+    ft.close()?;
 
 
-    let mut interface = enttecopendmx::EnttecOpenDMX::new().unwrap();
-    interface.open().unwrap();
-    // interface.set_channel(1 as usize, 255 as u8);
-    // interface.set_channel(2 as usize, 255 as u8);
+    let mut dmx = dmx::DMXController::new(Ft232r::with_serial_number("AB0N3G14")?);
+    dmx.init()?;
 
+    let mut frame = [0u8; 512];
+
+    thread::spawn(move || {
+        let mut frame = [0u8; 512];
+
+        frame[0] = 0x33;
+        frame[5] = 0x00;
+        frame[3] = 0x00;
+        // frame[8] = 0xff;
+        // frame[9] = 0xff;
+
+        frame[4] = 0x04;
+
+        let mut state: bool = false;
+        loop {
+            debug!("Writing DMX frame...");
+            dmx.write_frame(&frame).unwrap_or_else(|e| {
+                error!("Failed to write DMX frame: {:?}", e);
+                shutdown_tx.send(()).unwrap();
+            });
+
+            frame[3] = 0xff - frame[4];
+            frame[2] = 0xff - frame[4];
+
+            frame[4] = if state { 
+                frame[4] + 1
+            } else {
+                frame[4] - 1
+            };
+
+            if frame[4] > 0xef {
+                state = false;
+            } else if frame[4] < 0x01 {
+                state = true;
+            }
+        }
+        
+    });
+
+    // Connect to MQTT broker
     let mut mqttoptions = MqttOptions::new("rumqtt-sync", config.mqtt.host, 1883);
     mqttoptions.set_keep_alive(Duration::from_secs(5));
-
     let (mut client, mut connection) = Client::new(mqttoptions, 10);
-    client.subscribe("dmx/light1/control", QoS::AtMostOnce).unwrap();
 
-    // Iterate to poll the eventloop for connection progress
-    for (i, notification) in connection.iter().enumerate() {
-        // debug!("Notification = {:?}", notification);
-        match notification {
-            Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(p))) => {
-                if p.topic == "dmx/light1/control" {
 
-                    let obj = json::parse(std::str::from_utf8(&p.payload).unwrap()).unwrap();
-                    debug!("Received message: {:?}", obj);
-
-                    if obj.has_key("color") {
-                        let (r, g, b, w) = (obj["color"]["r"].as_u8().unwrap(), 
-                                                    obj["color"]["g"].as_u8().unwrap(), 
-                                                    obj["color"]["b"].as_u8().unwrap(),
-                                                    obj["color"]["w"].as_u8().unwrap_or(0));
-                        interface.set_channel(1 as usize, 255);
-                        interface.render().unwrap();
-                        thread::sleep(Duration::from_millis(10));
-                        interface.set_channel(3 as usize, r);
-                        interface.render().unwrap();
-                        thread::sleep(Duration::from_millis(10));
-                        interface.set_channel(4 as usize, g);
-                        interface.render().unwrap();
-                        thread::sleep(Duration::from_millis(10));
-                        interface.set_channel(5 as usize, b);
-                        interface.render().unwrap();
-                        thread::sleep(Duration::from_millis(10));
-                        interface.set_channel(6 as usize, w);
-                        interface.render().unwrap();
-                        thread::sleep(Duration::from_millis(10));
-                        info!("RGBW: R: {}, G: {}, B: {}, W: {}", r, g, b, w);
-
-                    }
-
-                }
-            },
-            Err(e) => error!("Error in connection: {:?}", e),
-            _ => {}
-        }
+    // Add configured lights to the system
+    for light in config.lights.iter() {
+        client.subscribe(format!("dmx/{}/control", light.id), QoS::AtMostOnce).unwrap();
+        debug!("Subscribed to {} on topic [{}]", light.name, format!("dmx/{}/control", light.id));
     }
-    // loop {
-    //     interface.set_channel(25 as usize, val);
-    //     interface.render().unwrap();
-    //     thread::sleep(Duration::from_millis(10));
-    //     val = if val > 240 { 0 } else { val + 1 };
-    // }
 
+    loop {
+
+        if shutdown_rx.try_recv().is_ok() {
+            info!("Shutdown signal received, exiting...");
+            break;
+        }
+
+
+        match connection.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(Ok(event)) => {
+               debug!("Received MQTT event: {:?}", event);
+            },
+            Ok(Err(e)) => {
+                error!("Error in MQTT connection: {:?}", e);
+            },
+            Err(_) => {
+                // Ignore this branch, just continue polling
+            },
+        }
+
+    }
+
+    Ok(())
 
 }

@@ -3,5 +3,28 @@ host="10.1.1.55"
 
 [[lights]]
 name="Light Bar"
-label="light1"
-type="RGB"
+id="light1"
+config.type = "RGBWDimmer"
+config.r = 3
+config.g = 4
+config.b = 5
+config.w = 6
+config.dimmer = 1
+
+[[lights]]
+name="Par 1"
+id="par1"
+config.type = "RGBW"
+config.r = 7
+config.g = 8
+config.b = 9
+config.w = 10
+
+[[lights]]
+name="Par 2"
+id="par2"
+config.type = "RGBW"
+config.r = 15
+config.g = 17
+config.b = 16
+config.w = 18
