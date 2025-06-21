@@ -1,0 +1,7 @@
+[mqtt]
+host="10.1.1.55"
+
+[[lights]]
+name="Light Bar"
+label="light1"
+type="RGB"

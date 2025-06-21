@@ -1,0 +1,14 @@
+[package]
+name = "dmx3"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+colog = "1.3.0"
+enttecopendmx = "0.1.1"
+json = "0.12.4"
+libftd2xx = "0.33.1"
+log = "0.4.27"
+rumqttc = "0.24.0"
+serde = { version = "1.0.219", features = ["derive"] }
+toml = "0.8.23"
