@@ -1,30 +1,46 @@
 [mqtt]
 host="10.1.1.55"
 
+# Set to 1
 [[lights]]
 name="Light Bar"
 id="light1"
 config.type = "RGBWDimmer"
-config.r = 3
-config.g = 4
-config.b = 5
-config.w = 6
-config.dimmer = 1
+config.r = 2
+config.g = 3
+config.b = 4
+config.w = 5
+config.dimmer = 0
 
+# Set to 8
 [[lights]]
-name="Par 1"
-id="par1"
-config.type = "RGBW"
-config.r = 7
-config.g = 8
-config.b = 9
-config.w = 10
+name="Bar 2"
+id="bar2"
+config.type = "RGBDimmer"
+config.r = 9
+config.g = 10
+config.b = 11
+config.dimmer = 8
 
+# Set to 15
 [[lights]]
 name="Par 2"
 id="par2"
-config.type = "RGBW"
-config.r = 15
-config.g = 17
-config.b = 16
-config.w = 18
+config.type = "RGBWDimmer"
+config.dimmer = 17
+config.r = 18
+config.g = 19
+config.b = 20
+config.w = 21
+
+
+# Set to 23
+[[lights]]
+name="Par 1"
+id="par1"
+config.type = "RGBWDimmer"
+config.dimmer = 25
+config.r = 26
+config.g = 27
+config.b = 28
+config.w = 29

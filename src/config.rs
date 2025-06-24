@@ -34,4 +34,15 @@ pub enum LightConfig {
         b: u8,
         w: u8
     },
+    RGB {
+        r: u8,
+        g: u8,
+        b: u8
+    },
+    RGBDimmer {
+        dimmer: u8,
+        r: u8,
+        g: u8,
+        b: u8
+    },
 }
