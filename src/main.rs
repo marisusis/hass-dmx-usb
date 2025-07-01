@@ -106,7 +106,16 @@ fn main() -> anyhow::Result<()> {
     });
 
     // Connect to MQTT broker
-    let mut mqttoptions = MqttOptions::new("rumqtt-sync", config.mqtt.host, 1883);
+    let mut mqttoptions = MqttOptions::new("rumqtt-sync", config.mqtt.clone().host, 1883);
+    // mqttoptions.set_credentials(username, password)
+    if config.mqtt.username.is_some() && config.mqtt.password.is_some() {
+        mqttoptions.set_credentials(
+            config.mqtt.username.clone().unwrap(),
+            config.mqtt.password.clone().unwrap(),
+        );
+    }
+
+    
     mqttoptions.set_keep_alive(Duration::from_secs(5));
     let (mut client, mut connection) = Client::new(mqttoptions, 10);
 

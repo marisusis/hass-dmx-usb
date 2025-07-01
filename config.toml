@@ -1,6 +1,7 @@
 [mqtt]
 host="10.1.1.55"
 
+
 # Set to 1
 [[lights]]
 name="Light Bar"

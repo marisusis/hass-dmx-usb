@@ -8,7 +8,9 @@ pub struct Config {
 
 #[derive(Deserialize,Debug)]
 pub struct MQTTConfig {
-    pub host: String
+    pub host: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Deserialize,Debug)]
