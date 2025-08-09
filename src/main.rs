@@ -2,8 +2,12 @@ use enttecopendmx;
 use libftd2xx::Ft232r;
 use libftd2xx::Ftdi;
 use libftd2xx::FtdiCommon;
-use rumqttc::{Client, MqttOptions, QoS};
+use paho_mqtt::DisconnectOptions;
+use paho_mqtt::Message;
 use serde::Deserialize;
+use serde_json::json;
+use tokio::sync::broadcast;
+use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::fs;
 use std::iter::Map;
@@ -12,6 +16,8 @@ use std::sync::RwLock;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+use paho_mqtt as mqtt;
+use anyhow::anyhow;
 
 use log::{debug, error, info, trace, warn};
 
@@ -23,6 +29,7 @@ use config::{Config, LightConfig, LightEntry};
 
 mod light;
 
+use crate::light::HALightControlMessage;
 use crate::light::LightState;
 
 fn load_config() -> Config {
@@ -39,9 +46,10 @@ fn load_config() -> Config {
     return config;
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     // Create a channel for shutdown signal
-    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let (shutdown_tx, mut shutdown_rx) = broadcast::channel(4);
 
     // Set up Ctrl-C handler
     let shutdown_tx_clone = shutdown_tx.clone();
@@ -51,20 +59,11 @@ fn main() -> anyhow::Result<()> {
     })?;
 
     let mut clog = colog::default_builder();
-    clog.filter(None, log::LevelFilter::Debug);
+    clog.filter(None, log::LevelFilter::Info);
     clog.init();
 
     let config = load_config();
     debug!("Loaded config: {:?}", config);
-
-    let mut data = Vec::with_capacity(512);
-    data.resize(512, 0); // Initialize with zeros
-    data[0] = 0xAA; // Start byte
-    // data[1] = 0x00; // Frame length (will be set later)
-    // data[2] = 0x00; // Frame length (will be set later)
-    data[3] = 0xff;
-    // data[4] = 0x04; // Frame type (DMX)
-    let mut data = Arc::new(RwLock::new(data));
 
     // Open DMX interface
     let mut ft = Ftdi::new()?;
@@ -75,63 +74,108 @@ fn main() -> anyhow::Result<()> {
     let mut dmx = dmx::DMXController::new(Ft232r::with_serial_number("AB0N3G14")?);
     dmx.init()?;
 
-    let data_clone = data.clone();
-    thread::spawn(move || {
-        let mut frame = Vec::new();
-        frame.resize(512, 0x00); // Initialize with zeros
-        frame[8] = 0xFF; // Example value for channel 8
-        frame[9] = 0xFF; // Example value for channel 9
-        frame[10] = 0x00; // Example value for channel 10
-        frame[11] = 0x00; // Example value for channel 11
+    let mut frame: Vec<u8> = vec![0; 512];
+    let frame = Arc::new(Mutex::new(frame));
+
+    
+    let frame_clone = frame.clone();
+    let shutdown_tx_1 = shutdown_tx.clone();
+    let handle = tokio::spawn(async move {
+        let frame= frame_clone;
+        let mut shutdown_rx = shutdown_tx_1.subscribe();
 
         loop {
-            debug!("Writing DMX frame...");
-            if let Ok(data) = data_clone.read() {
-                for (i, value) in data.iter().enumerate().take(22) {
-                    println!("{}: {}", i+1, value);
-                }
-            }
-
-            match data_clone.read() {
-                Ok(data) => {
-                    dmx.write_frame(data.as_slice()).unwrap_or_else(|e| {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    info!("Shutdown signal received, exiting...");
+                    break;
+                },
+                frame = frame.lock() => {
+                    dmx.write_frame(&frame).unwrap_or_else(|e| {
                         error!("Failed to write DMX frame: {:?}", e);
                         shutdown_tx.send(()).unwrap();
                     });
-                }
-                Err(_) => {}
+                },
             }
+
+            // let frame = frame.lock().await;
 
         }
     });
 
-    // Connect to MQTT broker
-    let mut mqttoptions = MqttOptions::new("rumqtt-sync", config.mqtt.clone().host, 1883);
-    // mqttoptions.set_credentials(username, password)
+    let cli = mqtt::AsyncClient::new("mqtt://10.1.1.21:1883")?;
+
+    let mut builder = mqtt::ConnectOptionsBuilder::new();
+
     if config.mqtt.username.is_some() && config.mqtt.password.is_some() {
-        mqttoptions.set_credentials(
-            config.mqtt.username.clone().unwrap(),
-            config.mqtt.password.clone().unwrap(),
-        );
+        builder.user_name(config.mqtt.username.clone().unwrap())
+            .password(config.mqtt.password.clone().unwrap());
     }
 
-    
-    mqttoptions.set_keep_alive(Duration::from_secs(5));
-    let (mut client, mut connection) = Client::new(mqttoptions, 10);
+    let response = cli.connect(builder.finalize()).await?;
+    info!("Connected to MQTT broker");
+
 
     let mut states: HashMap<String, Box<dyn LightState>> = HashMap::new();
 
+    let mut config_message = json!({
+        "device": {
+            "name": "DMX Controller",
+            "identifiers": ["dmx_controller"],
+            "manufacturer": "Maris Usis",
+            "model": "OpenDMX USB2MQTT",
+            "sw_version": env!("CARGO_PKG_VERSION"),
+        },
+        "o": {
+            "name": "DMX"
+        },
+        "cmps": {
+            // "l1": {
+            //     "p": "light",
+            //     "unique_id": "light1",
+            //     "identifier": "The Light ID",
+            //     "name": "The Light",
+            //     "state_topic": "homeassistant/light/the_light/state",
+            //     "command_topic": "homeassistant/light/the_light/command",
+            //     "brightness": "true",
+            //     "supported_color_modes":["rgbw"],
+            //     "schema":"json"
+            // },
+            // "l2": {
+            //     "p": "light",
+            //     "unique_id": "light2",
+            //     "identifier": "The Light ID2",
+            //     "name": "The Light 2",
+            //     "state_topic": "homeassistant/light/the_light2/state",
+            //     "command_topic": "homeassistant/light/the_light2/command",
+            //     "brightness": "true",
+            //     "supported_color_modes":["rgbw"],
+            //     "schema":"json"
+            // }
+        }
+    });
+
+
+
+
     // Add configured lights to the system
     for light in config.lights.iter() {
-        client
-            .subscribe(format!("dmx/{}/control", light.id), QoS::AtMostOnce)
-            .unwrap();
-        debug!(
-            "Subscribed to {} on topic [{}]",
-            light.name,
-            format!("dmx/{}/control", light.id)
+        config_message["cmps"].as_object_mut().unwrap().insert(
+            light.id.clone(),
+            json!({
+                "p": "light",
+                "unique_id": light.id,
+                "identifier": light.name,
+                "name": light.name,
+                "state_topic": format!("homeassistant/dmx/{}", light.id),
+                "command_topic": format!("homeassistant/dmx/{}/set", light.id),
+                "brightness": true,
+                "supported_color_modes": ["rgbw"],
+                "schema": "json"
+            })
         );
 
+        cli.subscribe(format!("homeassistant/dmx/{}/set", light.id), 1).await?;
         match light.config.clone() {
             LightConfig::RGBW { r, g, b, w } => {
                 let state = light::LightRGBW::new(r, g, b, w);
@@ -152,65 +196,55 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    for (id, light) in states.iter() {
-        debug!("Initial state for light: {:?}", light.get_state());
-        let state = light.get_state();
-        let topic = format!("dmx/{}/state", id);
-        let payload = serde_json::to_string(&state)?;
-        client.publish(topic, QoS::AtLeastOnce, false, payload.clone())?;
+    cli.publish(Message::new("homeassistant/device/dmx_controller/config", config_message.to_string(), 1)).await?;
+
+
+    for (id, state) in states.iter() {
+        let topic = format!("homeassistant/dmx/{}", id);
+        let payload = serde_json::to_string(&state.get_state())?;
+        cli.publish(Message::new(topic, payload, 1)).await?;
     }
 
-
+    let receiver = cli.start_consuming();
     loop {
+        if let Ok(Some(message)) = receiver.recv_timeout(Duration::from_secs(1)) {
+            if message.topic().starts_with("homeassistant/dmx/") {
+                let light_id = message.topic().split('/').nth(2).unwrap();
+
+
+                let control = serde_json::from_str::<HALightControlMessage>(&message.payload_str())
+                    .map_err(|e| {
+                        error!("Failed to parse message: {:?}", e);
+                        anyhow!("Failed to parse message")
+                    })?;
+
+                let state = states.get_mut(light_id)
+                    .ok_or_else(|| anyhow!("Light with ID {} not found", light_id))?;
+
+                state.update_state(control)?;
+
+                state.update_frame(&mut frame.lock().await);
+
+                let topic = format!("homeassistant/dmx/{}", light_id);
+                let mut payload = serde_json::to_value(&state.get_state())?;
+
+                // TODO silly hack need to rework light.rs and everything its very messy and makes me sad :()
+                payload["color_mode"] = json!("rgbw");
+                let payload = serde_json::to_string(&payload)?;
+                cli.publish(Message::new(topic, payload, 1)).await?;
+            }
+        }
         if shutdown_rx.try_recv().is_ok() {
             info!("Shutdown signal received, exiting...");
             break;
         }
 
-        match connection.recv_timeout(std::time::Duration::from_millis(10)) {
-            Ok(Ok(event)) => {
-                debug!("Received MQTT event: {:?}", event);
-                match {
-                    let event = match event {
-                        rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish)) => publish,
-                        _ => continue, // Ignore other events
-                    };
-
-                    let topic = event.topic;
-                    let payload = str::from_utf8(event.payload.as_ref()).unwrap();
-
-                    let control: light::HALightControlMessage = serde_json::from_str(payload)?;
-                    debug!("Parsed control message: {:?}", control);
-
-                    let id = topic.split('/').nth(1).ok_or(anyhow::anyhow!(
-                        "Invalid topic format: {}",
-                        topic
-                    ))?;
-
-                    let state = states.get_mut(id).ok_or(anyhow::anyhow!(
-                        "No state found for id {}",
-                        id
-                    ))?;
-
-                    state.update_state(control)?;
-                    info!("Updated state for light {}: {:?}", id, state);
-                    state.update_frame(&mut data.write().unwrap());
-                    // thread::sleep(Duration::from_millis(100));
-
-                    anyhow::Ok(())
-                } {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!("Failed to parse control message: {:?}", e);
-                    }
-                }
-            }
-            Ok(Err(e)) => {
-                error!("Error in MQTT connection: {:?}", e);
-            }
-            Err(_) => {}
-        }
     }
+
+    cli.disconnect(mqtt::DisconnectOptions::new()).await?;
+
+    handle.await?;
+    info!("DMX controller stopped, exiting...");
 
     Ok(())
 }
