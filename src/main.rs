@@ -10,7 +10,9 @@ use tokio::sync::broadcast;
 use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::fs;
+use std::hash::Hash;
 use std::iter::Map;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::mpsc;
@@ -25,12 +27,17 @@ mod dmx;
 use dmx::DMXDriver;
 
 mod config;
-use config::{Config, LightConfig, LightEntry};
+use config::{Config, LightChannelMapping, LightEntry};
 
+use crate::dmx::DMXController;
+use crate::dmx::FTDIDMXController;
+use crate::dmx::FTDI_DMX_Driver;
+use crate::hass::HomeAssistantLightStateMessage;
+use crate::light::DMXLight;
+
+// mod light;
 mod light;
-
-use crate::light::HALightControlMessage;
-use crate::light::LightState;
+mod hass;
 
 fn load_config() -> Config {
     let config_contents = match fs::read_to_string("config.toml") {
@@ -59,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
     })?;
 
     let mut clog = colog::default_builder();
-    clog.filter(None, log::LevelFilter::Info);
+    clog.filter(None, log::LevelFilter::Debug);
     clog.init();
 
     let config = load_config();
@@ -71,37 +78,10 @@ async fn main() -> anyhow::Result<()> {
     println!("Device information: {:?}", info);
     ft.close()?;
 
-    let mut dmx = dmx::DMXController::new(Ft232r::with_serial_number("AB0N3G14")?);
-    dmx.init()?;
-
-    let mut frame: Vec<u8> = vec![0; 512];
-    let frame = Arc::new(Mutex::new(frame));
-
-    
-    let frame_clone = frame.clone();
-    let shutdown_tx_1 = shutdown_tx.clone();
-    let handle = tokio::spawn(async move {
-        let frame= frame_clone;
-        let mut shutdown_rx = shutdown_tx_1.subscribe();
-
-        loop {
-            tokio::select! {
-                _ = shutdown_rx.recv() => {
-                    info!("Shutdown signal received, exiting...");
-                    break;
-                },
-                frame = frame.lock() => {
-                    dmx.write_frame(&frame).unwrap_or_else(|e| {
-                        error!("Failed to write DMX frame: {:?}", e);
-                        shutdown_tx.send(()).unwrap();
-                    });
-                },
-            }
-
-            // let frame = frame.lock().await;
-
-        }
-    });
+    let ftdi_driver = FTDI_DMX_Driver::new(Ft232r::with_serial_number("AB0N3G14")?);
+    let mut dmx = FTDIDMXController::new(ftdi_driver);
+    let dmx = Arc::new(Mutex::new(dmx));
+    dmx.lock().await.start()?;
 
     let cli = mqtt::AsyncClient::new("mqtt://10.1.1.21:1883")?;
 
@@ -115,8 +95,7 @@ async fn main() -> anyhow::Result<()> {
     let response = cli.connect(builder.finalize()).await?;
     info!("Connected to MQTT broker");
 
-
-    let mut states: HashMap<String, Box<dyn LightState>> = HashMap::new();
+    let mut dmx_lights: HashMap::<String, Box<dyn light::DMXLight>> = HashMap::new();
 
     let mut config_message = json!({
         "device": {
@@ -129,113 +108,124 @@ async fn main() -> anyhow::Result<()> {
         "o": {
             "name": "DMX"
         },
-        "cmps": {
-            // "l1": {
-            //     "p": "light",
-            //     "unique_id": "light1",
-            //     "identifier": "The Light ID",
-            //     "name": "The Light",
-            //     "state_topic": "homeassistant/light/the_light/state",
-            //     "command_topic": "homeassistant/light/the_light/command",
-            //     "brightness": "true",
-            //     "supported_color_modes":["rgbw"],
-            //     "schema":"json"
-            // },
-            // "l2": {
-            //     "p": "light",
-            //     "unique_id": "light2",
-            //     "identifier": "The Light ID2",
-            //     "name": "The Light 2",
-            //     "state_topic": "homeassistant/light/the_light2/state",
-            //     "command_topic": "homeassistant/light/the_light2/command",
-            //     "brightness": "true",
-            //     "supported_color_modes":["rgbw"],
-            //     "schema":"json"
-            // }
-        }
+        "cmps": {}
     });
 
-
-
-
     // Add configured lights to the system
-    for light in config.lights.iter() {
+    for light in config.lights.iter() { 
+
+        let new_light: Box<dyn DMXLight> = match light.config.clone() {
+            LightChannelMapping::RGBWDimmer(mapping) => Box::new(light::RGBWDimmerLight::new(mapping)),
+            LightChannelMapping::RGBDimmer(mapping) => Box::new(light::RGBDimmerLight::new(mapping)),
+        };
+
         config_message["cmps"].as_object_mut().unwrap().insert(
             light.id.clone(),
             json!({
                 "p": "light",
                 "unique_id": light.id,
-                "identifier": light.name,
-                "name": light.name,
+                "identifier": light.display_name,
+                "name": light.display_name,
                 "state_topic": format!("homeassistant/dmx/{}", light.id),
                 "command_topic": format!("homeassistant/dmx/{}/set", light.id),
                 "brightness": true,
-                "supported_color_modes": ["rgbw"],
-                "schema": "json"
+                "supported_color_modes": [match new_light.light_type() {
+                    light::LightType::RGBWDimmer => "rgbw",
+                    light::LightType::RGBDimmer => "rgb",
+                }],
+                "schema": "json",
+                "effect": true,
+                "effect_list": ["fire", "stars"]
             })
         );
 
+        
         cli.subscribe(format!("homeassistant/dmx/{}/set", light.id), 1).await?;
-        match light.config.clone() {
-            LightConfig::RGBW { r, g, b, w } => {
-                let state = light::LightRGBW::new(r, g, b, w);
-                states.insert(light.id.clone(), Box::new(state));
-            }
-            LightConfig::RGBWDimmer { dimmer, r, g, b, w } => {
-                let state = light::LightRGBWDimmer::new(r, g, b, w, dimmer);
-                states.insert(light.id.clone(), Box::new(state));
-            },
-            LightConfig::RGB { r, g, b } => {
-                let state = light::LightRGB::new(r, g, b);
-                states.insert(light.id.clone(), Box::new(state));
-            },
-            LightConfig::RGBDimmer { dimmer, r, g, b } => {
-                let state = light::LightRGBDimmer::new(r, g, b, dimmer);
-                states.insert(light.id.clone(), Box::new(state));
-            },
-        }
+        
+        dmx_lights.insert(light.id.clone(), new_light);
     }
 
     cli.publish(Message::new("homeassistant/device/dmx_controller/config", config_message.to_string(), 1)).await?;
 
+    for (light_id, light) in dmx_lights.iter() {
+        info!("Subscribed to light: {} with channels: {:?}", light_id, light.current_dmx_values());
+        let msg = light.hass_state();
 
-    for (id, state) in states.iter() {
-        let topic = format!("homeassistant/dmx/{}", id);
-        let payload = serde_json::to_string(&state.get_state())?;
-        cli.publish(Message::new(topic, payload, 1)).await?;
+        cli.publish(Message::new(
+            format!("homeassistant/dmx/{}", light_id),
+            serde_json::to_string(&msg)?,
+            1,
+        )).await?;
     }
+
+    // tokio::spawn(async move {
+    //     loop {
+    //         tokio::select! {
+    //             _ = shutdown_rx.recv() => {
+    //                 debug!("Received shutdown signal, exiting receive loop");
+    //                 break;
+    //             },
+    //             _ = tokio::time::sleep(Duration::from_secs(1)) => {
+    //                 // Periodic task can be added here if needed
+    //             }
+    //         }
+    //     }
+    // });
+
+
 
     let receiver = cli.start_consuming();
     loop {
         if let Ok(Some(message)) = receiver.recv_timeout(Duration::from_secs(1)) {
             if message.topic().starts_with("homeassistant/dmx/") {
                 let light_id = message.topic().split('/').nth(2).unwrap();
+                let mut light = dmx_lights.get_mut(light_id)
+                    .ok_or_else(|| anyhow!("Light with ID {} not found", light_id))?;
 
-
-                let control = serde_json::from_str::<HALightControlMessage>(&message.payload_str())
+                let mut message_json = serde_json::Value::from_str(&message.payload_str())
                     .map_err(|e| {
                         error!("Failed to parse message: {:?}", e);
                         anyhow!("Failed to parse message")
                     })?;
 
-                let state = states.get_mut(light_id)
-                    .ok_or_else(|| anyhow!("Light with ID {} not found", light_id))?;
+                message_json["color_mode"] = match light.light_type() {
+                    light::LightType::RGBWDimmer => json!("rgbw"),
+                    light::LightType::RGBDimmer => json!("rgb"),
+                };
 
-                state.update_state(control)?;
+                let state_message =  serde_json::from_value::<HomeAssistantLightStateMessage>(message_json)
+                    .map_err(|e| {
+                        error!("Failed to parse state message: {:?}", e);
+                        anyhow!("Failed to parse state message")
+                    })?;
 
-                state.update_frame(&mut frame.lock().await);
+                debug!("Received state message for light {}: {:?}", light_id, message.payload_str());
+                    
+
+                info!("Received state message for light {}: {:?}", light_id, state_message);
+                
+
+
+                light.update(&state_message)?;
+
+                dmx.lock().await.update_many(light.current_dmx_values()).await
+                    .map_err(|e| {
+                        error!("Failed to update DMX values: {:?}", e);
+                        anyhow!("Failed to update DMX values")
+                    })?;
 
                 let topic = format!("homeassistant/dmx/{}", light_id);
-                let mut payload = serde_json::to_value(&state.get_state())?;
+                let payload = serde_json::to_string(&light.hass_state())
+                    .map_err(|e| {
+                        error!("Failed to serialize light state: {:?}", e);
+                        anyhow!("Failed to serialize light state")
+                    })?;    
 
-                // TODO silly hack need to rework light.rs and everything its very messy and makes me sad :()
-                payload["color_mode"] = json!("rgbw");
-                let payload = serde_json::to_string(&payload)?;
                 cli.publish(Message::new(topic, payload, 1)).await?;
             }
         }
         if shutdown_rx.try_recv().is_ok() {
-            info!("Shutdown signal received, exiting...");
+            debug!("Exiting receive loop");
             break;
         }
 
@@ -243,7 +233,7 @@ async fn main() -> anyhow::Result<()> {
 
     cli.disconnect(mqtt::DisconnectOptions::new()).await?;
 
-    handle.await?;
+    dmx.lock_owned().await.stop().await?;
     info!("DMX controller stopped, exiting...");
 
     Ok(())

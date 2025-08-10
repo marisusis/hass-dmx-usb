@@ -1,10 +1,22 @@
 [mqtt]
-host="10.1.1.55"
+host="192.168.0.33"
+username="mqtt"
+password="12345678"
 
-
-# Set to 1
+# Set to 15
 [[lights]]
-name="Light Bar"
+display_name="Par 2"
+id="par2"
+config.type = "RGBWDimmer"
+config.dimmer = 17
+config.r = 18
+config.g = 19
+config.b = 20
+config.w = 21
+
+
+[[lights]]
+display_name="Light Bar"
 id="light1"
 config.type = "RGBWDimmer"
 config.r = 2
@@ -15,7 +27,7 @@ config.dimmer = 0
 
 # Set to 8
 [[lights]]
-name="Bar 2"
+display_name="Bar 2"
 id="bar2"
 config.type = "RGBDimmer"
 config.r = 9
@@ -23,21 +35,11 @@ config.g = 10
 config.b = 11
 config.dimmer = 8
 
-# Set to 15
-[[lights]]
-name="Par 2"
-id="par2"
-config.type = "RGBWDimmer"
-config.dimmer = 17
-config.r = 18
-config.g = 19
-config.b = 20
-config.w = 21
 
 
 # Set to 23
 [[lights]]
-name="Par 1"
+display_name="Par 1"
 id="par1"
 config.type = "RGBWDimmer"
 config.dimmer = 25
