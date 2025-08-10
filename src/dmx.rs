@@ -33,6 +33,7 @@ impl DMXDriver for FTDI_DMX_Driver {
         let mut buffer = Vec::with_capacity(1 + data.len());
         buffer.push(0x00);
         buffer.extend_from_slice(data);
+
         self.ftdi.write(&buffer)?;
 
         thread::sleep(std::time::Duration::from_millis(15));
@@ -111,7 +112,10 @@ impl DMXController for FTDIDMXController {
             // Initialize the driver
             debug!("Initializing DMX driver");
             driver.init().map_err(|_| DMXControllerError::InitError)?;
+            let mut now = std::time::Instant::now();
             loop {
+                info!("DMX controller loop running, elapsed: {:?}", now.elapsed());
+                now = std::time::Instant::now();
                 tokio::select! {
                     _ = token.cancelled() => {
                         debug!("Exiting DMX controller loop");
@@ -123,6 +127,7 @@ impl DMXController for FTDIDMXController {
                     }
                     // Here you can add more tasks to handle DMX data
                 }
+
             }
 
             Ok(driver)
@@ -134,6 +139,16 @@ impl DMXController for FTDIDMXController {
     }
 
     async fn stop(&mut self) -> Result<(), DMXControllerError> {
+        {
+            let mut frame = self.shared_frame.write().await;
+            for byte in frame.iter_mut() {
+                *byte = 0;
+            }
+        }
+        
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
         if let Some(channel) = self.token.take() {
             channel.cancel()
         } else {
@@ -164,7 +179,7 @@ impl DMXController for FTDIDMXController {
                 return Err(DMXControllerError::WriteError);
             }
             frame[channel as usize] = value;
-            debug!("Updated channel {} to value {}", channel, value);
+            // info!("Updated channel {} to value {}", channel, value);
         }
         Ok(())
     }

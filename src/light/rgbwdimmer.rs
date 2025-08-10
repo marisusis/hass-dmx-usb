@@ -1,7 +1,7 @@
 use log::debug;
 use serde::Deserialize;
 
-use crate::{hass::HomeAssistantLightStateMessage, light::DMXLight};
+use crate::{hass::HomeAssistantLightState, light::DMXLight};
 
 #[derive(Deserialize,Debug,Clone)]
 #[serde(tag = "type")]
@@ -68,7 +68,7 @@ impl DMXLight for RGBWDimmerLight {
         }
     }
     
-    fn update(&mut self, state: &crate::hass::HomeAssistantLightStateMessage) -> anyhow::Result<()> {
+    fn update(&mut self, state: &crate::hass::HomeAssistantLightState) -> anyhow::Result<()> {
 
         if let Some(color) = &state.color {
             match color {
@@ -92,8 +92,8 @@ impl DMXLight for RGBWDimmerLight {
         }
 
         self.state.on = match state.state {
-            crate::hass::State::ON => true,
-            crate::hass::State::OFF => false,
+            crate::hass::State::On => true,
+            crate::hass::State::Off => false,
         };
 
         Ok(())
@@ -103,16 +103,18 @@ impl DMXLight for RGBWDimmerLight {
         self.state = RGBWDimmerState::default();
     }
     
-    fn hass_state(&self) -> crate::hass::HomeAssistantLightStateMessage {
-        HomeAssistantLightStateMessage {
+    fn hass_state(&self) -> crate::hass::HomeAssistantLightState {
+        HomeAssistantLightState {
             brightness: Some(self.state.brightness),
+            color_mode: Some(crate::hass::ColorMode::RGBW),
             color: Some(crate::hass::Color::RGBW {
                 r: self.state.r,
                 g: self.state.g,
                 b: self.state.b,
                 w: self.state.w,
             }),
-            state: if self.state.on { crate::hass::State::ON } else { crate::hass::State::OFF },
+            state: if self.state.on { crate::hass::State::On } else { crate::hass::State::Off },
+            effect: None
         }
     }
     

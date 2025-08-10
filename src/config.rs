@@ -4,7 +4,7 @@ use crate::light::{RGBDimmerMapping, RGBWDimmerMapping};
 #[derive(Deserialize,Debug)]
 pub struct Config {
     pub mqtt: MQTTConfig,
-    pub lights: Vec<LightEntry>,
+    pub lights: Vec<LightSpecification>,
 }
 
 #[derive(Deserialize,Debug)]
@@ -14,41 +14,25 @@ pub struct MQTTConfig {
     pub password: Option<String>,
 }
 
-#[derive(Deserialize,Debug)]
-pub struct LightEntry {
+#[derive(Deserialize, Debug, Clone)]
+pub struct LightSpecification {
+    pub universe: String,
     pub id: String,
     pub display_name: String,
-    pub config: LightChannelMapping,
+    pub mapping: LightChannelMapping,
 }
 
-// #[derive(Deserialize,Debug,Clone)]
-// #[serde(tag = "type")]
 
-// pub struct RGBWMapping{
-//     pub r: u8,
-//     pub g: u8,
-//     pub b: u8,
-//     pub w: u8
-// }
+impl LightSpecification {
+    pub fn color_mode(&self) -> Option<String> {
+        match &self.mapping {
+            LightChannelMapping::RGBWDimmer(_) => Some("rgbw".to_string()),
+            LightChannelMapping::RGBDimmer(_) => Some("rgb".to_string()),
+        }
+    }
+}
 
 
-
-// #[derive(Deserialize,Debug,Clone)]
-// #[serde(tag = "type")]
-// pub struct RGBDimmerMapping{
-//     pub dimmer: u8,
-//     pub r: u8,
-//     pub g: u8,
-//     pub b: u8
-// }
-
-// #[derive(Deserialize,Debug,Clone)]
-// #[serde(tag = "type")]
-// pub struct RGBMapping{
-//     pub r: u8,
-//     pub g: u8,
-//     pub b: u8
-// }
 
 #[derive(Deserialize,Debug,Clone)]
 #[serde(tag = "type")]
@@ -57,4 +41,24 @@ pub enum LightChannelMapping {
     RGBWDimmer(RGBWDimmerMapping),
     // RGB(RGBMapping),
     RGBDimmer(RGBDimmerMapping),
+}
+
+impl LightChannelMapping {
+    pub fn off_frame_values(&self) -> Vec<(u16, u8)> {
+        match self {
+            LightChannelMapping::RGBWDimmer(mapping) => vec![
+                (mapping.r, 0),
+                (mapping.g, 0),
+                (mapping.b, 0),
+                (mapping.w, 0),
+                (mapping.dimmer, 0),
+            ],
+            LightChannelMapping::RGBDimmer(mapping) => vec![
+                (mapping.r, 0),
+                (mapping.g, 0),
+                (mapping.b, 0),
+                (mapping.dimmer, 0),
+            ],
+        }
+    }
 }
