@@ -114,8 +114,8 @@ impl DMXController for FTDIDMXController {
             driver.init().map_err(|_| DMXControllerError::InitError)?;
             let mut now = std::time::Instant::now();
             loop {
-                info!("DMX controller loop running, elapsed: {:?}", now.elapsed());
-                now = std::time::Instant::now();
+                
+                
                 tokio::select! {
                     _ = token.cancelled() => {
                         debug!("Exiting DMX controller loop");
@@ -123,7 +123,11 @@ impl DMXController for FTDIDMXController {
                     },
 
                     frame = frame.read() => {
-                        driver.write_frame(&*frame).map_err(|_| DMXControllerError::WriteError)?;
+                        let frame_copy = *frame;
+                        drop(frame);
+                        // debug!("DMX controller loop, elapsed: {:?}", now.elapsed());
+                        now = std::time::Instant::now();
+                        driver.write_frame(&frame_copy).map_err(|_| DMXControllerError::WriteError)?;
                     }
                     // Here you can add more tasks to handle DMX data
                 }

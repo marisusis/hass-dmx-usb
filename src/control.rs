@@ -1,6 +1,6 @@
 use std::{collections::HashMap, hash::Hash, sync::Arc};
 
-use log::{error, info};
+use log::{debug, error, info};
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -11,17 +11,26 @@ pub enum ControlMessage {
     LightState(String, HomeAssistantLightState),
 }
 
-struct LightState {
-    specification: LightSpecification,
-    control_state: HomeAssistantLightState,
+#[derive(PartialEq)]
+enum LightState {
+    Normal,
+    TurningOn,
+    TurningOff,
 }
 
-impl LightState {
+struct LightObject {
+    specification: LightSpecification,
+    control_state: HomeAssistantLightState,
+    state: LightState,
+}
+
+impl LightObject {
     pub fn new(specification: LightSpecification) -> Self {
         let control_state = HomeAssistantLightState::default_from_specification(&specification);
-        LightState {
+        LightObject {
             specification,
             control_state,
+            state: LightState::Normal,
         }
     }
 
@@ -72,7 +81,7 @@ impl LightState {
 
 pub struct LightController {
     universes: Arc<Mutex<HashMap<String, FTDIDMXController>>>,
-    lights: Arc<RwLock<HashMap<String, LightState>>>,
+    lights: Arc<RwLock<HashMap<String, LightObject>>>,
     token: Option<CancellationToken>,
     handle: Option<tokio::task::JoinHandle<()>>,
     tx: Option<tokio::sync::mpsc::Sender<ControlMessage>>, 
@@ -96,7 +105,7 @@ impl LightController{
     pub async fn add_light(&mut self, light: LightSpecification) -> anyhow::Result<()> {
         let mut lights = self.lights.write().await;
 
-        lights.insert(light.id.clone(), LightState::new(light));
+        lights.insert(light.id.clone(), LightObject::new(light));
 
         Ok(())
     }
@@ -105,7 +114,7 @@ impl LightController{
         let mut lights_map = self.lights.write().await;
 
         for light in lights {
-            lights_map.insert(light.id.clone(), LightState::new(light));
+            lights_map.insert(light.id.clone(), LightObject::new(light));
         }
 
         Ok(())
@@ -150,12 +159,25 @@ impl LightController{
                     error!("Failed to start DMX universe {}: {:?}", id, e);
                 }
             }
-            
-            let mut buffer: Vec<ControlMessage> = Vec::with_capacity(10);
 
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(1000));
+
+            {
+                let lights = lights.read().await;
+                let universes = universes.lock().await;
+                for (id, light) in lights.iter() {
+                    if let Some(universe) = universes.get(&light.specification.universe) {
+                        universe.update_many(light.frame_values()).await.unwrap();
+                    }
+                }
+            }
+            
+            let mut now = std::time::Instant::now();
+            let mut buffer: Vec<ControlMessage> = Vec::with_capacity(10);
+            let mut a = 0u8;
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(10));
             loop {
-                info!("LOOP!");
+                // debug!("Light controller loop, elapsed: {:?}", now.elapsed());
+                now = std::time::Instant::now();
                 tokio::select! {
                     _ = token.cancelled() => {
                         info!("Exiting LightController loop");
@@ -168,12 +190,30 @@ impl LightController{
                                     info!("Received LightState message for light {}: {:?}", light_id, state);
                                     let mut lights = lights.write().await;
                                     if let Some(light) = lights.get_mut(&light_id) {
+
+                                        // if light.control_state.state != state.state {
+                                        //     light.state = match state.state {
+                                        //         State::On => LightState::TurningOn,
+                                        //         State::Off => LightState::TurningOff,
+                                        //     };
+                                        // }
+
+
                                         light.control_state.update_with(&state);
 
-                                        let universe = light.specification.universe.clone();
-                                        if let Some(universe) = universes.lock().await.get_mut(&universe) {
-                                            universe.update_many(light.frame_values()).await.unwrap();
+                                        if light.state == LightState::Normal {
+                                            let universe = light.specification.universe.clone();
+                                            if let Some(universe) = universes.lock().await.get_mut(&universe) {
+                                                universe.update_many(light.frame_values()).await.unwrap();
+                                            }
                                         }
+
+                                        // if let Some(effect) = &light.control_state.effect {
+                                        //     debug!("Applying effect {:?} to light {}", effect, light_id);
+                                        //     // effect.apply(&mut light.control_state);
+                                        // } else {
+                                            
+                                        // }
                                     } else {
                                         error!("Light with ID {} not found", light_id);
                                     }
@@ -182,33 +222,16 @@ impl LightController{
                         }
                     },
                     _ = interval.tick() => {
-
-                        // Periodic task can be added here if needed
-                        // info!("asdf");
                         let lights = lights.read().await;
-                        let universes = universes.lock().await;
-                        let mut universe_updates: HashMap<String, Vec<(u16, u8)>> = HashMap::new();
-
                         for (id, light) in lights.iter() {
-                            if let Some(universe) = universes.get(&light.specification.universe) {
-                                universe_updates.entry(light.specification.universe.clone())
-                                    .or_insert_with(Vec::new)
-                                    .extend(light.frame_values());
-                            }
+                            // if light.state == LightState::TurningOn {
+                            //     light.state = LightState::Normal;
+                            //     if let Some(universe) = universes.lock().await.get(&light.specification.universe) {
+                            //         universe.update_many(light.frame_values()).await.unwrap();
+                            //     }
+                            // }
                         }
-
-                        for (universe_id, values) in universe_updates {
-                            if let Some(universe) = universes.get(&universe_id) {
-                                info!("updates yeah");
-                                if let Err(e) = universe.update_many(values).await {
-                                    error!("Failed to update DMX values for universe {}: {:?}", universe_id, e);
-                                }
-                            } else {
-                                error!("Universe with ID {} not found", universe_id);
-                            }
-                        }
-                    },
-                    // Handle other tasks or shutdown signals here
+                    }
                 }
             }
         });

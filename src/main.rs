@@ -177,8 +177,8 @@ async fn main() -> anyhow::Result<()> {
 
                 controller.update_light_state(light_id, hass_message.clone()).await?;
 
-                // let state = controller.get_hass_state(light_id).await
-                    // .ok_or_else(|| anyhow!("Light with ID {} not found", light_id))?;
+                let state = controller.get_hass_state(light_id).await
+                    .ok_or_else(|| anyhow!("Light with ID {} not found", light_id))?;
 
                 // light.update(&hass_message)?;
 
@@ -188,27 +188,27 @@ async fn main() -> anyhow::Result<()> {
                 //         anyhow!("Failed to update DMX values")
                 //     })?;
 
-                // let topic = format!("homeassistant/dmx/{}", light_id);
-                // let payload = serde_json::to_string(&state)
-                //     .map_err(|e| {
-                //         error!("Failed to serialize light state: {:?}", e);
-                //         anyhow!("Failed to serialize light state")
-                //     })?;    
+                let topic = format!("homeassistant/dmx/{}", light_id);
+                let payload = serde_json::to_string(&state)
+                    .map_err(|e| {
+                        error!("Failed to serialize light state: {:?}", e);
+                        anyhow!("Failed to serialize light state")
+                    })?;    
 
-                // cli.publish(Message::new(topic, payload, 1)).await?;
+                cli.publish(Message::new(topic, payload, 1)).await?;
             }
         }
 
-        // for (light_id, light) in controller.get_all_hass_states().await.iter() {
-        //     let topic = format!("homeassistant/dmx/{}", light_id);
-        //     let payload = serde_json::to_string(light)
-        //         .map_err(|e| {
-        //             error!("Failed to serialize light state: {:?}", e);
-        //             anyhow!("Failed to serialize light state")
-        //         })?;
+        for (light_id, light) in controller.get_all_hass_states().await.iter() {
+            let topic = format!("homeassistant/dmx/{}", light_id);
+            let payload = serde_json::to_string(light)
+                .map_err(|e| {
+                    error!("Failed to serialize light state: {:?}", e);
+                    anyhow!("Failed to serialize light state")
+                })?;
 
-        //     cli.publish(Message::new(topic, payload, 1)).await?;
-        // }
+            cli.publish(Message::new(topic, payload, 1)).await?;
+        }
 
         // for (light_id, light) in dmx_lights.iter_mut() {
         //     cli.publish(Message::new(
